@@ -1,0 +1,23 @@
+# Render blueprint: https://render.com/docs/blueprint-spec
+# New + > Blueprint, point it at this repo, deploy.
+services:
+  - type: web
+    name: ancmed-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: ANCMED_DATA_DIR
+        value: /data
+      # Set this to your repo URL to satisfy the AGPL "offer source" clause
+      # from the app's footer.
+      - key: ANCMED_SOURCE_URL
+        value: https://github.com/YOUR_USERNAME/ancmed-bot
+
+# NOTE: Render's free plan has no persistent disk, so saved games are lost when
+# the instance sleeps/restarts. For durable games, upgrade the service and add:
+#   disk:
+#     name: data
+#     mountPath: /data
+#     sizeGB: 1

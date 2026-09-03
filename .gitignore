@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+*.tmp
+*.log
+smoke_*.svg
+gid.txt
+st*.json

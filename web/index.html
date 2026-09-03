@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Diplomacy vs. Bots</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Diplomacy <span class="dim">vs.</span> Bots</h1>
+    <div id="status" class="status"></div>
+    <button id="new-game-btn" class="ghost" hidden>New game</button>
+  </header>
+
+  <main>
+    <!-- setup -->
+    <section id="setup" class="panel">
+      <h2>New game</h2>
+      <label>Map
+        <select id="map-select"></select>
+      </label>
+      <label>Play as
+        <select id="power-select"></select>
+      </label>
+      <p id="map-note" class="note"></p>
+      <button id="start-btn">Start game</button>
+      <p class="note" id="setup-error" hidden></p>
+    </section>
+
+    <!-- game -->
+    <section id="game" class="game" hidden>
+      <div class="board">
+        <div id="map-holder"></div>
+      </div>
+      <aside class="side">
+        <div id="banner" class="banner" hidden></div>
+
+        <div class="card">
+          <h3>Supply centres</h3>
+          <table id="sc-table"></table>
+          <p class="note" id="win-note"></p>
+        </div>
+
+        <div class="card" id="orders-card">
+          <h3 id="orders-title">Orders</h3>
+          <div id="orders-list"></div>
+          <button id="submit-btn">Submit orders</button>
+          <p class="note" id="orders-hint"></p>
+        </div>
+
+        <details class="card" id="results-card">
+          <summary>Last phase</summary>
+          <div id="results-body"></div>
+        </details>
+      </aside>
+    </section>
+  </main>
+
+  <footer>
+    <span id="source-link"></span>
+    Built on the AGPL-3.0
+    <a href="https://github.com/diplomacy/diplomacy" target="_blank" rel="noopener">diplomacy</a>
+    engine &mdash; this app is offered under the same licence.
+  </footer>
+
+  <div id="overlay" class="overlay" hidden><div class="spinner"></div><span>Bots are moving&hellip;</span></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
