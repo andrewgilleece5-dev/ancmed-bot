@@ -39,10 +39,10 @@ The repo is a self-contained Docker image (`Dockerfile`) that listens on `$PORT`
 
 ### Render (free tier)
 
-1. Push this repo to GitHub.
-2. Edit `render.yaml` — set `ANCMED_SOURCE_URL` to your repo URL (the app footer
-   links there to satisfy the AGPL "offer source" clause).
-3. In Render: **New ▸ Blueprint**, point it at the repo, **Apply**.
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/andrewgilleece5-dev/ancmed-bot)
+
+Or manually: **New ▸ Blueprint** in Render, point it at this repo, **Apply**.
+`render.yaml` does the rest.
 
 Render's free plan has no persistent disk, so saved games are lost when the
 instance sleeps. For durable games, upgrade the service and add the `disk:`
