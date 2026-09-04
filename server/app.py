@@ -205,7 +205,7 @@ def list_maps():
             out.append({"name": name, "label": label, "powers": powers_for(name)})
         except Exception:  # pragma: no cover
             continue
-    return {"maps": out, "difficulties": DIFFICULTIES}
+    return {"maps": out, "difficulties": DIFFICULTIES, "source_url": SOURCE_URL}
 
 
 @app.post("/api/games")

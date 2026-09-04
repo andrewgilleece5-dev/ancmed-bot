@@ -53,6 +53,7 @@ const title = (s) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s);
 async function initSetup() {
   const data = await api("/api/maps");
   MAPS = data.maps;
+  if (data.source_url) el.sourceLink.href = data.source_url;
   el.mapSelect.innerHTML = MAPS.map((m) => `<option value="${m.name}">${m.label}</option>`).join("");
   el.difficultySelect.innerHTML = data.difficulties
     .map((d) => `<option value="${d}"${d === "medium" ? " selected" : ""}>${title(d)}</option>`)
