@@ -48,3 +48,30 @@ def test_advance_helper_keeps_human_in_sync():
     assert game.is_game_done or game.get_orderable_locations("ROME") or "ROME" not in [
         pw for pw, c in game.get_state()["centers"].items() if c
     ]
+
+
+def test_advance_trims_excess_builds():
+    """Submitting more builds than allowed shouldn't error - extras are dropped."""
+    from diplomacy import Game
+    from server.app import _advance
+
+    game = Game(map_name="standard")
+    game.set_orders("GERMANY", ["A BER - KIE", "F KIE - HOL", "A MUN - RUH"])
+    game.process()
+    game.set_orders("GERMANY", ["A KIE - DEN", "F HOL - BEL", "A RUH H"])
+    game.process()
+    assert game.phase_type == "A"
+    power = game.get_power("GERMANY")
+    cap = len(power.centers) - len(power.units)
+    assert cap >= 1
+
+    meta = {"human_power": "GERMANY", "map_name": "standard", "bot": "medium"}
+    # ask for a build at every open home centre (more than `cap`)
+    possible = game.get_all_possible_orders()
+    greedy = []
+    for loc in game.get_orderable_locations("GERMANY"):
+        greedy += [o for o in possible.get(loc, []) if o.endswith(" B")][:1]
+    _advance(game, meta, greedy)  # must not raise
+
+    power = game.get_power("GERMANY")
+    assert len(power.units) - 3 <= cap  # built at most `cap` new units

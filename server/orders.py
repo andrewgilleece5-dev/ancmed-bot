@@ -47,7 +47,14 @@ def parse(order):
     if verb == "R":
         return {"action": "retreat", "loc": province(unit_loc), "target": province(tok[3])}
     if verb == "C":
-        return {"action": "convoy", "loc": province(unit_loc), "target": province(tok[-1])}
+        # "C <type> <from> - <to>"
+        src = province(tok[4]) if len(tok) > 4 else None
+        return {
+            "action": "convoy",
+            "loc": province(unit_loc),
+            "from": src,
+            "target": province(tok[-1]),
+        }
     if verb == "S":
         # "S <type> <loc>"  (support hold)  or  "S <type> <loc> - <loc>" (support move)
         if "-" in tok:
@@ -61,3 +68,121 @@ def parse(order):
         return {"action": "support_hold", "loc": province(unit_loc), "target": province(tok[4])}
 
     return {"action": "other"}
+
+
+# --------------------------------------------------------------------------- #
+#  Friendly order tree                                                         #
+# --------------------------------------------------------------------------- #
+# The frontend renders one row per unit: a primary <select> of action types,
+# and (when the action needs one) a secondary <select> of full province names.
+# Every leaf carries the exact engine order string, so nothing is re-assembled
+# client-side.
+
+_ACTION_ORDER = [
+    "hold", "move", "support_hold", "support_move", "convoy",
+    "retreat", "disband", "build_army", "build_fleet", "waive",
+]
+
+
+def _dest_token(order):
+    """The destination token of a move/retreat, keeping any coast (`SPA/NC`)."""
+    tok = order.split()
+    for kw in ("-", "R"):
+        if kw in tok:
+            return tok[tok.index(kw) + 1]
+    return tok[-1]
+
+
+def _name(province_name, code):
+    base = code.split("/")[0]
+    label = (province_name(base) if province_name else None) or base.title()
+    if "/" in code:
+        label += " (%s)" % code.split("/", 1)[1].upper()
+    return label
+
+
+def order_tree(loc, options, phase_type, province_name=None):
+    """Build the friendly action tree for one orderable location.
+
+    `options` is `game.get_all_possible_orders()[loc]`; `province_name` maps a
+    3-letter code to a full name (or returns None).
+    """
+    grouped = {}
+    for order in options:
+        grouped.setdefault(parse(order)["action"], []).append(order)
+
+    is_build_site = phase_type == "A" and "build" in grouped
+    non_waive = [o for o in options if o != "WAIVE"]
+    unit = "" if is_build_site else (" ".join(non_waive[0].split()[:2]) if non_waive else "")
+
+    actions = []
+
+    def add_leaf(kind, order):
+        actions.append({"type": kind, "order": order})
+
+    def targets(orders, dest_of):
+        seen, out = set(), []
+        for o in sorted(orders):
+            dest = dest_of(o)
+            if dest in seen:
+                continue
+            seen.add(dest)
+            out.append({"label": _name(province_name, dest), "order": o})
+        return out
+
+    if phase_type == "M":
+        if grouped.get("hold"):
+            add_leaf("hold", grouped["hold"][0])
+        if grouped.get("move"):
+            actions.append({"type": "move", "targets": targets(grouped["move"], _dest_token)})
+        if grouped.get("support_hold"):
+            actions.append({
+                "type": "support_hold",
+                "targets": targets(grouped["support_hold"], lambda o: parse(o)["target"]),
+            })
+        for kind in ("support_move", "convoy"):
+            if grouped.get(kind):
+                moves = []
+                for o in sorted(grouped[kind]):
+                    p = parse(o)
+                    moves.append({
+                        "label": "%s → %s" % (
+                            _name(province_name, p["from"]), _name(province_name, p["target"])),
+                        "order": o,
+                    })
+                actions.append({"type": kind, "moves": moves})
+
+    elif phase_type == "R":
+        if grouped.get("retreat"):
+            actions.append({"type": "retreat", "targets": targets(grouped["retreat"], _dest_token)})
+        if grouped.get("disband"):
+            add_leaf("disband", grouped["disband"][0])
+
+    elif phase_type == "A":
+        if is_build_site:
+            armies = [o for o in grouped["build"] if o.split()[0] == "A"]
+            fleets = [o for o in grouped["build"] if o.split()[0] == "F"]
+            if armies:
+                add_leaf("build_army", armies[0])
+            if len(fleets) == 1:
+                add_leaf("build_fleet", fleets[0])
+            elif fleets:
+                actions.append({
+                    "type": "build_fleet",
+                    "targets": [{"label": _name(province_name, o.split()[1]), "order": o}
+                                for o in sorted(fleets)],
+                })
+            add_leaf("waive", "WAIVE")
+        if grouped.get("disband"):
+            add_leaf("disband", grouped["disband"][0])
+            add_leaf("keep", "")
+
+    actions.sort(key=lambda a: _ACTION_ORDER.index(a["type"]) if a["type"] in _ACTION_ORDER else 99)
+
+    if unit:
+        kind = "Fleet" if unit.split()[0] == "F" else "Army"
+        label = "%s in %s" % (kind, _name(province_name, loc))
+    else:
+        label = "Build in %s" % _name(province_name, loc)
+
+    return {"loc": loc, "unit": unit, "label": label, "actions": actions}

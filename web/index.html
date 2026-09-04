@@ -23,16 +23,26 @@
       <label>Play as
         <select id="power-select"></select>
       </label>
+      <label>Bot difficulty
+        <select id="difficulty-select"></select>
+      </label>
       <p id="map-note" class="note"></p>
       <button id="start-btn">Start game</button>
-      <p class="note" id="setup-error" hidden></p>
+      <p class="note err" id="setup-error" hidden></p>
     </section>
 
     <!-- game -->
     <section id="game" class="game" hidden>
-      <div class="board">
-        <div id="map-holder"></div>
+      <div class="board-col">
+        <div class="timebar" id="timebar" hidden>
+          <button id="hist-prev" class="ghost" title="Previous phase">◀</button>
+          <input type="range" id="hist-slider" min="0" max="0" value="0" />
+          <button id="hist-next" class="ghost" title="Next phase">▶</button>
+          <span id="hist-label" class="hist-label"></span>
+        </div>
+        <div class="board"><div id="map-holder"></div></div>
       </div>
+
       <aside class="side">
         <div id="banner" class="banner" hidden></div>
 
@@ -44,9 +54,14 @@
 
         <div class="card" id="orders-card">
           <h3 id="orders-title">Orders</h3>
+          <p class="note" id="orders-hint"></p>
           <div id="orders-list"></div>
           <button id="submit-btn">Submit orders</button>
-          <p class="note" id="orders-hint"></p>
+        </div>
+
+        <div class="card" id="history-note" hidden>
+          <p>Viewing <strong id="history-note-label"></strong>.</p>
+          <button id="return-current">Return to current turn ▸</button>
         </div>
 
         <details class="card" id="results-card">
@@ -58,10 +73,9 @@
   </main>
 
   <footer>
-    <span id="source-link"></span>
     Built on the AGPL-3.0
     <a href="https://github.com/diplomacy/diplomacy" target="_blank" rel="noopener">diplomacy</a>
-    engine &mdash; this app is offered under the same licence.
+    engine. <a id="source-link" href="#" target="_blank" rel="noopener">Source</a>.
   </footer>
 
   <div id="overlay" class="overlay" hidden><div class="spinner"></div><span>Bots are moving&hellip;</span></div>
