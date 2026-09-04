@@ -11,13 +11,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pa
 from server.bot import DumbBot  # noqa: E402
 
 
-@pytest.mark.parametrize("map_name", ["ancmed", "standard", "pure"])
-def test_every_bot_order_is_legal(map_name):
+@pytest.mark.parametrize(
+    "map_name,level",
+    [
+        ("ancmed", "easy"), ("ancmed", "medium"), ("ancmed", "hard"),
+        ("standard", "medium"), ("standard", "hard"), ("pure", "medium"),
+    ],
+)
+def test_every_bot_order_is_legal(map_name, level):
     game = Game(map_name=map_name)
-    bot = DumbBot(seed=7)
+    bot = DumbBot(seed=7, level=level)
     seen_phase_types = set()
 
-    for _ in range(80):
+    for _ in range(60 if level == "hard" else 80):
         if game.is_game_done:
             break
         seen_phase_types.add(game.phase_type)
@@ -58,3 +64,11 @@ def test_bot_handles_adjustment_builds_and_disbands():
                 game.set_orders(power, bot.get_orders(game, power))
         game.process()
     assert hit_adjustment
+
+
+def test_make_bot_maps_legacy_name():
+    from server.bot import make_bot
+
+    assert make_bot("dumbbot").level == "medium"
+    assert make_bot("hard").level == "hard"
+    assert make_bot("nonsense").level == "medium"

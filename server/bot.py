@@ -17,6 +17,9 @@ import math
 import random
 from collections import defaultdict
 
+from diplomacy import Game
+from diplomacy.utils.export import from_saved_game_format, to_saved_game_format
+
 from .orders import parse, province
 
 
@@ -27,6 +30,18 @@ class Bot:
 
     def get_orders(self, game, power_name):  # pragma: no cover - interface only
         raise NotImplementedError
+
+
+# Difficulty presets. `medium` is the baseline heuristic; `easy` plays loose and
+# blunders; `hard` sharpens every knob and adds a one-move lookahead.
+_LEVELS = {
+    "easy":   {"temperature": 0.90, "jitter": 0.35, "blunder_rate": 0.15,
+               "coordinate": False, "lookahead": False},
+    "medium": {"temperature": 0.28, "jitter": 0.12, "blunder_rate": 0.0,
+               "coordinate": True,  "lookahead": False},
+    "hard":   {"temperature": 0.12, "jitter": 0.05, "blunder_rate": 0.0,
+               "coordinate": True,  "lookahead": True},
+}
 
 
 class DumbBot(Bot):
@@ -47,14 +62,19 @@ class DumbBot(Bot):
 
     STRENGTH_FACTOR = 0.22      # our nearby units make an attack more appealing
     COMPETITION_FACTOR = 0.35   # enemy nearby units make it riskier
-    JITTER = 0.12
-    TEMPERATURE = 0.28          # softmax temperature for move selection
     HOLD_PENALTY = 0.30
     SUPPORT_SWITCH_MARGIN = 0.30  # value a support must beat a unit's own plan by
 
-    def __init__(self, seed=None):
+    def __init__(self, seed=None, level="medium"):
         self._rng = random.Random(seed)
         self._adj_by_map = {}
+        cfg = _LEVELS.get(level, _LEVELS["medium"])
+        self.level = level if level in _LEVELS else "medium"
+        self.TEMPERATURE = cfg["temperature"]
+        self.JITTER = cfg["jitter"]
+        self.blunder_rate = cfg["blunder_rate"]
+        self.coordinate = cfg["coordinate"]
+        self.lookahead = cfg["lookahead"]
 
     # ------------------------------------------------------------------ graph
     def _adjacency(self, game):
@@ -184,6 +204,7 @@ class DumbBot(Bot):
         order_locs = sorted(order_locs, key=best_option_value, reverse=True)
 
         chosen = {}        # loc -> order string
+        ranked = {}        # loc -> options best-first (for lookahead fallback)
         move_target = {}   # loc -> province being entered, or None
         claimed = set()    # provinces already taken as a destination by our units
         for loc in order_locs:
@@ -210,14 +231,24 @@ class DumbBot(Bot):
                 else:
                     score = -9.0  # support/convoy: only if nothing else exists
                 scored.append((score, order, p))
-            _, order, p = self._weighted_choice(scored)
+            _, order, p = self._weighted_choice(scored)  # sorts `scored` best-first
+
+            # easy bot: sometimes just do something random
+            if self.blunder_rate and self._rng.random() < self.blunder_rate:
+                order = self._rng.choice(options)
+                p = parse(order)
+
             chosen[loc] = order
+            ranked[loc] = [o for _, o, _ in scored]
             target = p["target"] if p["action"] == "move" else None
             move_target[loc] = target
             if target:
                 claimed.add(target)
 
-        self._add_supports(power_name, values, possible, chosen, move_target)
+        if self.coordinate:
+            self._add_supports(power_name, values, possible, chosen, move_target)
+        if self.lookahead:
+            self._refine_with_lookahead(game, power_name, chosen, ranked)
         return list(chosen.values())
 
     def _add_supports(self, power_name, values, possible, chosen, move_target):
@@ -258,6 +289,55 @@ class DumbBot(Bot):
             if best_order:
                 chosen[loc] = best_order
                 move_target[loc] = None
+
+    # -------------------------------------------------------------- lookahead
+    def _refine_with_lookahead(self, game, power_name, chosen, ranked):
+        """`hard` only: simulate the turn (opponents played by a medium bot); for
+        every order of ours that bounced or got the unit dislodged, try the next
+        best option and keep the swap if it reduces the damage."""
+        bad = self._order_outcomes(game, power_name, chosen)
+        if not bad:
+            return
+        trial = dict(chosen)
+        for loc in bad:
+            for alt in ranked.get(loc, [])[1:4]:
+                if alt != trial[loc]:
+                    trial[loc] = alt
+                    break
+        if trial != chosen and len(self._order_outcomes(game, power_name, trial)) < len(bad):
+            chosen.clear()
+            chosen.update(trial)
+
+    def _order_outcomes(self, game, power_name, chosen):
+        try:
+            clone = from_saved_game_format(to_saved_game_format(game))
+            clone.set_orders(power_name, list(chosen.values()))
+            opponent = DumbBot(seed=self._rng.random(), level="medium")
+            for other in clone.powers:
+                if other != power_name:
+                    try:
+                        clone.set_orders(other, opponent.get_orders(clone, other))
+                    except Exception:
+                        pass
+            clone.process()
+        except Exception:
+            return set()
+
+        units_now = set(clone.get_power(power_name).units)
+        dislodged = set(clone.get_power(power_name).retreats)
+        bad = set()
+        for loc, order in chosen.items():
+            tok = order.split()
+            p = parse(order)
+            if p["action"] == "move":
+                dest = tok[tok.index("-") + 1] if "-" in tok else tok[-1]
+                want = tok[0] + " " + dest
+                if want in dislodged or want not in units_now:
+                    bad.add(loc)
+            elif p["action"] in ("hold", "support_hold", "support_move"):
+                if (tok[0] + " " + loc) in dislodged:
+                    bad.add(loc)
+        return bad
 
     # -------------------------------------------------------------- retreats
     def _retreats(self, game, power_name):
@@ -330,8 +410,13 @@ class DumbBot(Bot):
         return orders
 
 
-BOTS = {"dumbbot": DumbBot}
+_ALIASES = {"dumbbot": "medium"}
 
 
-def make_bot(name="dumbbot", seed=None):
-    return BOTS.get(name, DumbBot)(seed=seed)
+def make_bot(name="medium", seed=None):
+    """`name` is a difficulty ('easy' / 'medium' / 'hard'); 'dumbbot' (the v1
+    value stored in old games) maps to 'medium'."""
+    level = _ALIASES.get(name, name)
+    if level not in _LEVELS:
+        level = "medium"
+    return DumbBot(seed=seed, level=level)

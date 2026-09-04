@@ -82,6 +82,7 @@ button:disabled { opacity: .5; cursor: default; }
   .game { grid-template-columns: 1fr; }
 }
 
+.board-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .board {
   background: var(--card);
   border: 1px solid var(--line);
@@ -90,6 +91,19 @@ button:disabled { opacity: .5; cursor: default; }
   overflow-x: auto;
 }
 #map-holder svg { width: 100%; height: auto; display: block; }
+
+.timebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+.timebar input[type="range"] { flex: 1; accent-color: var(--accent); }
+.timebar button.ghost { padding: 2px 8px; font-size: 13px; }
+.hist-label { font-size: 13px; color: var(--dim); min-width: 12ch; text-align: right; }
 
 .side { display: flex; flex-direction: column; gap: 16px; }
 .card { padding: 14px 16px; }
@@ -110,9 +124,15 @@ summary { cursor: pointer; font-weight: 600; font-size: 15px; }
 #sc-table tr.out td { color: var(--dim); text-decoration: line-through; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; border: 1px solid rgba(0,0,0,.3); vertical-align: baseline; }
 
-.order-row { margin-bottom: 8px; }
-.order-row label { font-size: 12px; color: var(--dim); display: block; }
-.order-row select { width: 100%; padding: 6px; font: inherit; }
+.order-row { margin-bottom: 10px; }
+.order-row > label { font-size: 12px; color: var(--dim); display: block; margin-bottom: 2px; }
+.order-row .selects { display: flex; gap: 6px; }
+.order-row .selects select { padding: 6px; font: inherit; min-width: 0; }
+.order-row .primary { flex: 0 0 42%; }
+.order-row .secondary { flex: 1; }
+.order-row .secondary[hidden] { display: none; }
+
+#history-note button { margin-top: 8px; }
 
 #results-body { font-size: 13px; }
 #results-body .pw { margin-top: 8px; font-weight: 700; }

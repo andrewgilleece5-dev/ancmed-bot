@@ -6,14 +6,23 @@ games don't offer — starting with **Ancient Mediterranean**, plus Classic
 
 - **Engine / adjudication / maps / board rendering:** the open-source
   [`diplomacy`](https://github.com/diplomacy/diplomacy) package (DATC-compliant).
-- **AI:** a map-agnostic *DumbBot*-style heuristic (`server/bot.py`). Weak to
-  moderate — it fights, holds ground and grabs centres, but it doesn't
-  negotiate, coordinate across powers, or look ahead. A `Bot` base class is in
-  place so a stronger engine can drop in later.
+- **AI:** a map-agnostic *DumbBot*-style heuristic (`server/bot.py`) at three
+  difficulties — **easy** (loose, blunders), **medium** (the baseline), **hard**
+  (sharper + a one-move lookahead). It fights and grabs centres but doesn't
+  negotiate or coordinate across powers. A `Bot` base class allows a stronger
+  engine to drop in later.
 - **Server:** a thin FastAPI app. One game object per game id, kept in memory and
   mirrored to disk so a refresh resumes.
-- **UI:** one static HTML page — pick a map and a power, then choose an order for
-  each unit from a dropdown and submit. The bots move, the board re-renders.
+- **UI:** one static HTML page.
+  - Pick a map, a power and a difficulty.
+  - Order each unit with a plain-language picker (Hold / Move to… / Support hold…
+    / Support move… / Convoy…) using full province names — no `A PAR - BUR`
+    notation to learn.
+  - Build phases: choose which centres to build at; the rest are waived.
+  - Scrub back through every past turn with a slider — the board redraws that
+    position with the move / support / hold arrows that were ordered.
+  - The Modern map colours each nation's home territory (not just its supply
+    centres) from turn one (`server/territory.py`).
 
 ## Run it locally
 
@@ -77,6 +86,11 @@ Set `ANCMED_DATA_DIR` to a writable path (a mounted volume for persistence) and
 5. **Retreats** go to the best adjacent province, else disband. **Builds** go to
    the most valuable home centres (fleet if coastal); **disbands** remove the
    least useful units.
+
+Difficulty tunes the knobs: **easy** raises randomness and blunders ~15 % of
+moves and skips step 4; **hard** lowers randomness, always coordinates, and
+adds a lookahead — it simulates the turn (opponents played by a medium bot) and,
+for any order that bounced or got the unit dislodged, tries the next-best option.
 
 Everything is derived from `game.map` + `game.get_state()`, so the same code runs
 unchanged on every map.
