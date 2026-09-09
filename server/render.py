@@ -24,11 +24,11 @@ def render_board(game, map_name, phase=None):
             svg = _render_phase(map_name, phase)
             state = phase.state
         else:
-            svg = game.render(incl_orders=True, incl_abbrev=False)
+            svg = game.render(incl_orders=True, incl_abbrev=True)
             state = game.get_state()
     except Exception:
         # never let a rendering problem take down the API
-        return game.render(incl_orders=True) if phase is None else ""
+        return game.render(incl_orders=True, incl_abbrev=True) if phase is None else ""
 
     try:
         svg = _fix_svg_id_aliases(svg, map_name, state)
@@ -47,7 +47,7 @@ def _render_phase(map_name, phase):
                 tmp.set_orders(power, orders)
             except Exception:
                 pass
-    return Renderer(tmp).render(incl_orders=True, incl_abbrev=False)
+    return Renderer(tmp).render(incl_orders=True, incl_abbrev=True)
 
 
 # --------------------------------------------------------------------- helpers
