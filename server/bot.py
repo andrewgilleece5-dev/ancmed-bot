@@ -1,26 +1,32 @@
 """Map-agnostic heuristic bots.
 
-``DumbBot`` follows the spirit of David Norman's classic DumbBot: it never looks
-ahead, it just scores every province by how good it would be to own (weighted by
-nearby supply centres and who holds them), smears that value across the board so
-units drift toward valuable clusters, and then plays, for each unit, the legal
-order that lands on the best province. A light coordination pass adds supports
-for the strongest contested moves.
+``DumbBot`` is in the spirit of David Norman's classic DumbBot: score every
+province by how good it would be to own (enemy centres weighted by their owner's
+size so the leader gets ganged up on; our own centres weighted by how hard
+they're being pressed), blur that value across the board, then for every unit
+score every legal order by the value of the province it affects and pick
+probabilistically. A second pass lets units swap a plain move for *supporting* a
+neighbour's move or hold when that is worth more - which is where coordinated
+attacks and defence come from, without a hand-written planner.
 
-Every order returned is copied verbatim from
-``game.get_all_possible_orders()``, so the bot can never emit an illegal order.
-All inputs come from ``game`` / ``game.map``, so the same code works on
-``ancmed``, ``standard``, ``pure``, ``modern`` or any other loaded map.
+Every order returned is copied verbatim from ``game.get_all_possible_orders()``,
+so the bot can never emit an illegal order.
 """
 
 import math
 import random
 from collections import defaultdict
 
-from diplomacy import Game
-from diplomacy.utils.export import from_saved_game_format, to_saved_game_format
-
 from .orders import parse, province
+
+
+def _convoy_move(order):
+    """A '... - X VIA' order: the bot doesn't arrange convoys, so it ignores these."""
+    return order.endswith(" VIA")
+
+
+def _move_target(parsed):
+    return parsed["target"] if parsed and parsed.get("action") == "move" else None
 
 
 class Bot:
@@ -32,38 +38,47 @@ class Bot:
         raise NotImplementedError
 
 
-# Difficulty presets. `medium` is the baseline heuristic; `easy` plays loose and
-# blunders; `hard` sharpens every knob and adds a one-move lookahead.
+# Difficulty is *behaviour*, not just noise.
+#   easy   - follows the value field loosely, ignores defence, blunders often,
+#            never coordinates
+#   medium - follows the field, supports its attacks, defends its centres
+#   hard   - same, but decisive (low temperature), never blunders, defends
+#            harder, and commits more units to a break-in
 _LEVELS = {
-    "easy":   {"temperature": 0.90, "jitter": 0.35, "blunder_rate": 0.15,
-               "coordinate": False, "lookahead": False},
-    "medium": {"temperature": 0.28, "jitter": 0.12, "blunder_rate": 0.0,
-               "coordinate": True,  "lookahead": False},
-    "hard":   {"temperature": 0.12, "jitter": 0.05, "blunder_rate": 0.0,
-               "coordinate": True,  "lookahead": True},
+    "easy":   {"temperature": 1.15, "jitter": 0.45, "blunder_rate": 0.22,
+               "support": False, "defend_weight": 0.30, "max_supporters": 1},
+    "medium": {"temperature": 0.35, "jitter": 0.12, "blunder_rate": 0.0,
+               "support": True,  "defend_weight": 1.00, "max_supporters": 2},
+    "hard":   {"temperature": 0.16, "jitter": 0.06, "blunder_rate": 0.0,
+               "support": True,  "defend_weight": 1.30, "max_supporters": 3},
 }
 
 
 class DumbBot(Bot):
     name = "dumbbot"
 
-    # A province's value is the value of the best supply centre reachable from
-    # it, discounted by GRADIENT_DECAY per step of distance. That makes a smooth
-    # potential field: from any square at least one neighbour is worth more, so
-    # units keep climbing toward the most valuable target instead of camping.
-    GRADIENT_DECAY = 0.86
-    GRADIENT_STEPS = 12
+    # supply-centre base values
+    OWN_BASE = 1.5              # a quiet centre of ours
+    THREAT_W = 2.6              # ... + this per enemy unit that can reach it (× defend_weight)
+    ATTACK_BASE = 4.0           # any enemy centre
+    SIZE_W = 0.45              # ... + this per centre its owner holds (lean on the leader)
+    LONE_BONUS = 2.5           # ... + this if the owner is small - finish off the weak
+    NEUTRAL_BASE = 4.5          # a neutral centre
+    WEAK_W = 2.2                # ... + this per attacker we have beyond its defenders
 
-    ENEMY_SC = 2.0
-    NEUTRAL_SC = 1.6
-    OWN_SC_SAFE = 0.25          # already ours and quiet: don't sit on it
-    OWN_SC_THREATENED = 2.4     # ours with an enemy next door: defend it
-    NON_SC_BASE = 0.05
+    # blur: value[p] = best reachable base value decayed per step, plus a lighter
+    # diffusion so a cluster of targets outpulls a lone one
+    GRADIENT_DECAY = 0.90
+    GRADIENT_STEPS = 20
+    DIFFUSE_STEPS = 6
+    DIFFUSE_ATTEN = 0.35
 
-    STRENGTH_FACTOR = 0.22      # our nearby units make an attack more appealing
-    COMPETITION_FACTOR = 0.35   # enemy nearby units make it riskier
-    HOLD_PENALTY = 0.30
-    SUPPORT_SWITCH_MARGIN = 0.30  # value a support must beat a unit's own plan by
+    STRENGTH_W = 0.30           # our units that can reach a square
+    COMPETITION_W = 0.55        # strongest enemy that can reach it
+    HOLD_PENALTY = 0.9          # sitting still is worse than advancing
+    SUPPORT_MOVE_FACTOR = 1.00  # value of supporting a friendly move (× target value)
+    SUPPORT_HOLD_FACTOR = 0.95
+    SWITCH_MARGIN = 0.25        # a support must beat the unit's own plan by this
 
     def __init__(self, seed=None, level="medium"):
         self._rng = random.Random(seed)
@@ -73,8 +88,9 @@ class DumbBot(Bot):
         self.TEMPERATURE = cfg["temperature"]
         self.JITTER = cfg["jitter"]
         self.blunder_rate = cfg["blunder_rate"]
-        self.coordinate = cfg["coordinate"]
-        self.lookahead = cfg["lookahead"]
+        self.support = cfg["support"]
+        self.defend_weight = cfg["defend_weight"]
+        self.MAX_SUPPORTERS = cfg["max_supporters"]
 
     # ------------------------------------------------------------------ graph
     def _adjacency(self, game):
@@ -82,7 +98,6 @@ class DumbBot(Bot):
         cached = self._adj_by_map.get(game.map.name)
         if cached is not None:
             return cached
-
         provinces = {province(loc) for loc in game.map.locs}
         adj = {p: set() for p in provinces}
         for loc in game.map.locs:
@@ -94,40 +109,86 @@ class DumbBot(Bot):
         self._adj_by_map[game.map.name] = adj
         return adj
 
+    # ---------------------------------------------------------- reachability
+    @staticmethod
+    def _reach(game, possible):
+        """province -> {power -> set(orderable 3-letter loc)} : every square each
+        power's units could move to (or hold on), taken straight from the legal
+        moves so it always matches the adjudicator."""
+        unit_power = {}
+        for pw, units in game.get_state()["units"].items():
+            for unit in units:
+                if not unit.startswith("*"):
+                    unit_power[unit[2:]] = pw
+        reach = defaultdict(lambda: defaultdict(set))
+        for orders in possible.values():
+            for order in orders:
+                if _convoy_move(order):
+                    continue
+                tok = order.split()
+                if len(tok) < 2 or tok[1] not in unit_power:
+                    continue
+                pw = unit_power[tok[1]]
+                src = tok[1][:3]
+                p = parse(order)
+                if p["action"] == "move":
+                    reach[p["target"]][pw].add(src)
+                elif p["action"] == "hold":
+                    reach[province(tok[1])][pw].add(src)
+        return reach
+
     # ------------------------------------------------------------ valuation
-    def _province_values(self, game, power_name):
+    def _province_values(self, game, power_name, possible, reach):
         adj = self._adjacency(game)
         state = game.get_state()
-
-        sc_owner = {}
-        for pw, centers in state["centers"].items():
-            for center in centers:
-                sc_owner[province(center)] = pw
-        all_scs = {province(s) for s in game.map.scs}
-
-        unit_at = {}  # province -> power holding a (non-dislodged) unit there
+        centers = state["centers"]
+        sizes = {pw: len(cs) for pw, cs in centers.items()}
+        owner = {province(c): pw for pw, cs in centers.items() for c in cs}
+        all_sc = {province(s) for s in game.map.scs}
+        unit_at = {}
         for pw, units in state["units"].items():
             for unit in units:
                 if not unit.startswith("*"):
                     unit_at[province(unit[2:])] = pw
 
-        # intrinsic worth of each province (its own supply-centre value)
+        def strength(p):
+            return len(reach.get(p, {}).get(power_name, ()))
+
+        def competition(p):
+            r = reach.get(p, {})
+            return max((len(v) for e, v in r.items() if e != power_name), default=0)
+
+        def defenders(p):
+            o = owner.get(p)
+            if not o or o == power_name:
+                return 0
+            d = 1 if unit_at.get(p) == o else 0
+            d += sum(1 for q in adj[p] if unit_at.get(q) == o)
+            return d
+
         base = {}
         for p in adj:
-            if p in all_scs:
-                owner = sc_owner.get(p)
-                if owner is None:
-                    base[p] = self.NEUTRAL_SC
-                elif owner != power_name:
-                    base[p] = self.ENEMY_SC
-                elif any(unit_at.get(q) not in (None, power_name) for q in adj[p]):
-                    base[p] = self.OWN_SC_THREATENED
+            if p in all_sc:
+                o = owner.get(p)
+                if o == power_name:
+                    base[p] = self.OWN_BASE + self.defend_weight * self.THREAT_W * competition(p)
+                elif o:
+                    takeable = max(0, strength(p) - defenders(p))
+                    osize = sizes.get(o, 0)
+                    base[p] = (self.ATTACK_BASE + self.SIZE_W * osize
+                               + self.WEAK_W * takeable)
+                    if osize <= 4:
+                        # a small power - lean toward finishing it off; extra if
+                        # we already have force in range
+                        base[p] += self.LONE_BONUS * (5 - osize)
+                        if strength(p) >= 1:
+                            base[p] += self.LONE_BONUS
                 else:
-                    base[p] = self.OWN_SC_SAFE
+                    base[p] = self.NEUTRAL_BASE + self.WEAK_W * max(0, strength(p) - 1)
             else:
-                base[p] = self.NON_SC_BASE
+                base[p] = 0.0
 
-        # potential field: value[p] = best reachable base value, decayed by distance
+        # gradient
         value = dict(base)
         for _ in range(self.GRADIENT_STEPS):
             changed = False
@@ -141,35 +202,35 @@ class DumbBot(Bot):
             if not changed:
                 break
 
-        # local force balance + a little noise so games diverge
-        for p in adj:
-            ring = list(adj[p]) + [p]
-            own = sum(1 for q in ring if unit_at.get(q) == power_name)
-            enemy_counts = defaultdict(int)
-            for q in ring:
-                holder = unit_at.get(q)
-                if holder is not None and holder != power_name:
-                    enemy_counts[holder] += 1
-            enemy = max(enemy_counts.values()) if enemy_counts else 0
-            value[p] += self.STRENGTH_FACTOR * own - self.COMPETITION_FACTOR * enemy
-            value[p] += self._rng.uniform(-self.JITTER, self.JITTER)
+        # diffusion
+        prox = dict(base)
+        weight = 1.0
+        for _ in range(self.DIFFUSE_STEPS):
+            prox = {p: (prox[p] + sum(prox[q] for q in adj[p])) / (len(adj[p]) + 1)
+                    for p in adj}
+            weight *= self.DIFFUSE_ATTEN
+            for p in adj:
+                value[p] += weight * prox[p]
 
+        for p in adj:
+            value[p] += (self.STRENGTH_W * strength(p)
+                         - self.COMPETITION_W * competition(p)
+                         + self._rng.uniform(-self.JITTER, self.JITTER))
         return value
 
     # -------------------------------------------------------------- dispatch
     def get_orders(self, game, power_name):
-        phase_type = game.phase_type
-        if phase_type == "M":
+        if game.phase_type == "M":
             return self._movement(game, power_name)
-        if phase_type == "R":
+        if game.phase_type == "R":
             return self._retreats(game, power_name)
-        if phase_type == "A":
+        if game.phase_type == "A":
             return self._adjustments(game, power_name)
         return []
 
     # -------------------------------------------------------------- movement
     def _weighted_choice(self, scored):
-        """scored: list of (score, order, parsed). Softmax-sample the top few."""
+        """scored: list of (score, order, parsed); sorts best-first, softmax-samples."""
         scored.sort(key=lambda item: item[0], reverse=True)
         top = scored[:4]
         best = top[0][0]
@@ -180,35 +241,45 @@ class DumbBot(Bot):
         for (score, order, parsed), weight in zip(top, weights):
             acc += weight
             if pick <= acc:
-                return score, order, parsed
-        return top[0]
+                return order, parsed
+        return top[0][1], top[0][2]
 
     def _movement(self, game, power_name):
-        values = self._province_values(game, power_name)
         possible = game.get_all_possible_orders()
+        reach = self._reach(game, possible)
+        values = self._province_values(game, power_name, possible, reach)
 
         order_locs = game.get_orderable_locations(power_name)
-        own_locs = [province(loc) for loc in order_locs]
+        own_here = {province(loc) for loc in order_locs}
+        loc_at = {province(loc): loc for loc in order_locs}
 
-        def best_option_value(loc):
-            best = -9.0
-            for order in possible.get(loc, []):
-                p = parse(order)
-                if p["action"] == "move":
-                    best = max(best, values.get(p["target"], 0.0))
-                elif p["action"] == "hold":
-                    best = max(best, values.get(province(loc), 0.0))
-            return best
+        def opts(loc):
+            return possible.get(loc, [])
 
-        # Let the units with the most to gain pick first; others adapt around them.
-        order_locs = sorted(order_locs, key=best_option_value, reverse=True)
-
-        chosen = {}        # loc -> order string
-        ranked = {}        # loc -> options best-first (for lookahead fallback)
-        move_target = {}   # loc -> province being entered, or None
-        claimed = set()    # provinces already taken as a destination by our units
+        # which convoy moves we can escort: {(src, dst): [fleet loc that can convoy]}
+        convoy_escorts = defaultdict(list)
         for loc in order_locs:
-            options = possible.get(loc, [])
+            for o in opts(loc):
+                cp = parse(o)
+                if cp["action"] == "convoy":
+                    convoy_escorts[(cp["from"], cp["target"])].append(loc)
+
+        # ---- pass 1: every unit picks a plain move / hold ----------------
+        plan = {}          # loc -> parsed order
+        order_of = {}      # loc -> order string
+        entering = {}      # province -> set(source loc) of our units moving in
+        escorting = {}     # fleet loc -> convoy order it must play
+
+        def best_gain(loc):
+            here = province(loc)
+            mv = [values.get(parse(o)["target"], 0.0)
+                  for o in opts(loc) if parse(o)["action"] == "move"]
+            return (max(mv) if mv else 0.0) - values.get(here, 0.0)
+
+        for loc in sorted(order_locs, key=best_gain, reverse=True):
+            if loc in escorting:
+                continue
+            options = opts(loc)
             if not options:
                 continue
             here = province(loc)
@@ -217,144 +288,137 @@ class DumbBot(Bot):
                 p = parse(order)
                 if p["action"] == "move":
                     tgt = p["target"]
-                    score = values.get(tgt, 0.0)
-                    # avoid our own units bouncing off each other: another unit
-                    # already heading there, a direct swap, or a stationary friend.
-                    if tgt in claimed:
-                        score -= 3.0
-                    elif move_target.get(tgt) == here:
-                        score -= 3.0
-                    elif tgt in own_locs and tgt != here:
-                        score -= 2.5
+                    if _convoy_move(order):
+                        free = [f for f in convoy_escorts.get((here, tgt), [])
+                                if f not in plan and f not in escorting and f != loc]
+                        s = values.get(tgt, 0.0) - 0.5 if free else -50.0
+                    elif tgt in entering or plan.get(loc_at.get(tgt), {}).get("target") == here:
+                        s = -50.0                      # our own units would bounce
+                    elif tgt in own_here and tgt != here and not _is_vacating(loc_at.get(tgt), plan):
+                        s = -50.0
+                    else:
+                        s = values.get(tgt, 0.0)
                 elif p["action"] == "hold":
-                    score = values.get(here, 0.0) - self.HOLD_PENALTY
+                    s = values.get(here, 0.0) - self.HOLD_PENALTY
                 else:
-                    score = -9.0  # support/convoy: only if nothing else exists
-                scored.append((score, order, p))
-            _, order, p = self._weighted_choice(scored)  # sorts `scored` best-first
-
-            # easy bot: sometimes just do something random
+                    s = -20.0                          # supports handled in pass 2
+                scored.append((s, order, p))
+            order, p = self._weighted_choice(scored)
             if self.blunder_rate and self._rng.random() < self.blunder_rate:
-                order = self._rng.choice(options)
+                order = self._rng.choice([o for o in options if not _convoy_move(o)] or options)
                 p = parse(order)
-
-            chosen[loc] = order
-            ranked[loc] = [o for _, o, _ in scored]
-            target = p["target"] if p["action"] == "move" else None
-            move_target[loc] = target
-            if target:
-                claimed.add(target)
-
-        if self.coordinate:
-            self._add_supports(power_name, values, possible, chosen, move_target)
-        if self.lookahead:
-            self._refine_with_lookahead(game, power_name, chosen, ranked)
-        return list(chosen.values())
-
-    def _add_supports(self, power_name, values, possible, chosen, move_target):
-        our_moves = defaultdict(list)  # target province -> [source province]
-        for loc, target in move_target.items():
-            if target:
-                our_moves[target].append(province(loc))
-        holders = {province(loc) for loc, target in move_target.items() if target is None}
-
-        for loc in list(chosen):
-            here = province(loc)
-            current_target = move_target[loc]
-            current_value = (
-                values.get(current_target, 0.0)
-                if current_target
-                else values.get(here, 0.0)
-            )
-            best_order = None
-            best_value = current_value + self.SUPPORT_SWITCH_MARGIN
-
-            for order in possible.get(loc, []):
-                p = parse(order)
-                if p["action"] == "support_move":
-                    target, src = p["target"], p["from"]
-                    if src == here:
-                        continue
-                    if any(m == src for m in our_moves.get(target, [])):
-                        if values.get(target, 0.0) > best_value:
-                            best_order, best_value = order, values.get(target, 0.0)
-                elif p["action"] == "support_hold":
-                    target = p["target"]
-                    if target in holders and target != here:
-                        # support a neighbour sitting on a valuable/own centre
-                        support_value = values.get(target, 0.0) * 0.85
-                        if support_value > best_value:
-                            best_order, best_value = order, support_value
-
-            if best_order:
-                chosen[loc] = best_order
-                move_target[loc] = None
-
-    # -------------------------------------------------------------- lookahead
-    def _refine_with_lookahead(self, game, power_name, chosen, ranked):
-        """`hard` only: simulate the turn (opponents played by a medium bot); for
-        every order of ours that bounced or got the unit dislodged, try the next
-        best option and keep the swap if it reduces the damage."""
-        bad = self._order_outcomes(game, power_name, chosen)
-        if not bad:
-            return
-        trial = dict(chosen)
-        for loc in bad:
-            for alt in ranked.get(loc, [])[1:4]:
-                if alt != trial[loc]:
-                    trial[loc] = alt
-                    break
-        if trial != chosen and len(self._order_outcomes(game, power_name, trial)) < len(bad):
-            chosen.clear()
-            chosen.update(trial)
-
-    def _order_outcomes(self, game, power_name, chosen):
-        try:
-            clone = from_saved_game_format(to_saved_game_format(game))
-            clone.set_orders(power_name, list(chosen.values()))
-            opponent = DumbBot(seed=self._rng.random(), level="medium")
-            for other in clone.powers:
-                if other != power_name:
-                    try:
-                        clone.set_orders(other, opponent.get_orders(clone, other))
-                    except Exception:
-                        pass
-            clone.process()
-        except Exception:
-            return set()
-
-        units_now = set(clone.get_power(power_name).units)
-        dislodged = set(clone.get_power(power_name).retreats)
-        bad = set()
-        for loc, order in chosen.items():
-            tok = order.split()
-            p = parse(order)
+            plan[loc], order_of[loc] = p, order
             if p["action"] == "move":
-                dest = tok[tok.index("-") + 1] if "-" in tok else tok[-1]
-                want = tok[0] + " " + dest
-                if want in dislodged or want not in units_now:
-                    bad.add(loc)
-            elif p["action"] in ("hold", "support_hold", "support_move"):
-                if (tok[0] + " " + loc) in dislodged:
-                    bad.add(loc)
-        return bad
+                entering.setdefault(p["target"], set()).add(here)
+                if _convoy_move(order):
+                    need = 1
+                    for f in convoy_escorts.get((here, p["target"]), []):
+                        if need <= 0:
+                            break
+                        if f in plan or f in escorting or f == loc:
+                            continue
+                        cvy = next((o for o in opts(f) if parse(o)["action"] == "convoy"
+                                    and parse(o)["from"] == here
+                                    and parse(o)["target"] == p["target"]), None)
+                        if cvy:
+                            escorting[f] = cvy
+                            order_of[f] = cvy
+                            plan[f] = parse(cvy)
+                            need -= 1
+
+        # ---- pass 2: back the best attacks / defend held centres --------
+        if self.support:
+            # anchor moves: the province each unit is moving into, kept fixed so
+            # supporters have something real to point at
+            anchor_mover = {}   # province -> the one loc whose move we support
+            for loc, p in plan.items():
+                if p["action"] == "move":
+                    anchor_mover.setdefault(p["target"], loc)
+            supported = defaultdict(int)
+
+            for loc in sorted(order_locs,
+                              key=lambda l: values.get(_move_target(plan.get(l)), 0.0)
+                              if plan.get(l, {}).get("action") == "move"
+                              else values.get(province(l), 0.0)):
+                if loc not in plan or loc in escorting:
+                    continue
+                here = province(loc)
+                cur = plan[loc]
+                # never pull a unit off an anchor move that others rely on
+                if cur["action"] == "move" and anchor_mover.get(cur["target"]) == loc:
+                    continue
+                cur_val = (values.get(cur["target"], 0.0) if cur["action"] == "move"
+                           else values.get(here, 0.0) - self.HOLD_PENALTY)
+                best = (None, None, cur_val + self.SWITCH_MARGIN)
+                for order in opts(loc):
+                    p = parse(order)
+                    if p["action"] == "support_move":
+                        tgt, src = p["target"], p["from"]
+                        if anchor_mover.get(tgt) is None or province(anchor_mover[tgt]) != src:
+                            continue
+                        if supported[tgt] >= self.MAX_SUPPORTERS:
+                            continue
+                        v = values.get(tgt, 0.0) * self.SUPPORT_MOVE_FACTOR
+                        if v > best[2]:
+                            best = (order, p, v)
+                    elif p["action"] == "support_hold":
+                        tgt = p["target"]
+                        holder = loc_at.get(tgt)
+                        if (holder is None or holder not in plan
+                                or plan[holder]["action"] == "move"):
+                            continue
+                        if supported[tgt] >= self.MAX_SUPPORTERS:
+                            continue
+                        v = values.get(tgt, 0.0) * self.SUPPORT_HOLD_FACTOR
+                        if v > best[2]:
+                            best = (order, p, v)
+                if best[0]:
+                    if cur["action"] == "move":
+                        entering.get(cur["target"], set()).discard(here)
+                    plan[loc], order_of[loc] = best[1], best[0]
+                    supported[best[1]["target"]] += 1
+
+            # cleanup: drop any support that no longer points at a real action
+            movers = {p["target"] for p in plan.values() if p["action"] == "move"}
+            for loc, p in list(plan.items()):
+                if p["action"] == "support_move" and p["target"] not in movers:
+                    order_of[loc] = self._fallback(loc, opts(loc), plan)
+                    plan[loc] = parse(order_of[loc])
+                elif p["action"] == "support_hold":
+                    holder = loc_at.get(p["target"])
+                    if not holder or plan.get(holder, {}).get("action") == "move":
+                        order_of[loc] = self._fallback(loc, opts(loc), plan)
+                        plan[loc] = parse(order_of[loc])
+
+        return list(order_of.values())
+
+    @staticmethod
+    def _fallback(loc, options, plan):
+        """A safe order for a unit whose support just got invalidated: hold if we
+        can, else an unobstructed move, else anything legal."""
+        hold = next((o for o in options if parse(o)["action"] == "hold"), None)
+        if hold:
+            return hold
+        taken = {p["target"] for p in plan.values() if p.get("action") == "move"}
+        move = next((o for o in options
+                     if parse(o)["action"] == "move" and not _convoy_move(o)
+                     and parse(o)["target"] not in taken), None)
+        return move or options[0]
 
     # -------------------------------------------------------------- retreats
     def _retreats(self, game, power_name):
-        values = self._province_values(game, power_name)
         possible = game.get_all_possible_orders()
+        reach = self._reach(game, possible)
+        values = self._province_values(game, power_name, possible, reach)
         orders = []
         for loc in game.get_orderable_locations(power_name):
             options = possible.get(loc, [])
             retreats = [o for o in options if parse(o)["action"] == "retreat"]
             if retreats:
-                orders.append(
-                    max(
-                        retreats,
-                        key=lambda o: values.get(parse(o)["target"], 0.0)
-                        + self._rng.uniform(0.0, self.JITTER),
-                    )
-                )
+                orders.append(max(
+                    retreats,
+                    key=lambda o: values.get(parse(o)["target"], 0.0)
+                    + self._rng.uniform(0.0, self.JITTER)))
             else:
                 disbands = [o for o in options if parse(o)["action"] == "disband"]
                 if disbands:
@@ -363,27 +427,23 @@ class DumbBot(Bot):
 
     # ----------------------------------------------------------- adjustments
     def _adjustments(self, game, power_name):
-        values = self._province_values(game, power_name)
         possible = game.get_all_possible_orders()
+        reach = self._reach(game, possible)
+        values = self._province_values(game, power_name, possible, reach)
         state = game.get_state()
         build = state["builds"][power_name]
         count = build["count"]
         orders = []
 
         if count > 0:
-            sites = sorted(
-                build["homes"], key=lambda s: values.get(province(s), 0.0), reverse=True
-            )
+            sites = sorted(build["homes"],
+                           key=lambda s: values.get(province(s), 0.0), reverse=True)
             for site in sites:
                 if len(orders) >= count:
                     break
-                builds = [
-                    o
-                    for key, opts in possible.items()
-                    if province(key) == province(site)
-                    for o in opts
-                    if parse(o)["action"] == "build"
-                ]
+                builds = [o for key, o_list in possible.items()
+                          if province(key) == province(site)
+                          for o in o_list if parse(o)["action"] == "build"]
                 if not builds:
                     continue
                 fleets = [o for o in builds if o.split()[0] == "F"]
@@ -401,13 +461,16 @@ class DumbBot(Bot):
             weakest = sorted(units, key=lambda u: values.get(province(u[2:]), 0.0))
             for unit in weakest[: -count]:
                 loc = unit[2:5]
-                disbands = [
-                    o for o in possible.get(loc, []) if parse(o)["action"] == "disband"
-                ]
+                disbands = [o for o in possible.get(loc, [])
+                            if parse(o)["action"] == "disband"]
                 if disbands:
                     orders.append(disbands[0])
-
         return orders
+
+
+def _is_vacating(loc, plan):
+    """True if `loc` holds a unit of ours that pass 1 has moving away."""
+    return bool(loc and loc in plan and plan[loc]["action"] == "move")
 
 
 _ALIASES = {"dumbbot": "medium"}

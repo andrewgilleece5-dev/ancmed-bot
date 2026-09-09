@@ -94,11 +94,13 @@ def _dest_token(order):
 
 
 def _name(province_name, code):
+    """'ION' -> 'Ionian Sea (ION)'; 'SPA/NC' -> 'Spain (SPA/NC)'. The parenthetical
+    matches the abbreviation printed on the board."""
     base = code.split("/")[0]
-    label = (province_name(base) if province_name else None) or base.title()
-    if "/" in code:
-        label += " (%s)" % code.split("/", 1)[1].upper()
-    return label
+    full = (province_name(base) if province_name else None)
+    if not full:
+        return code.upper()
+    return "%s (%s)" % (full, code.upper())
 
 
 def order_tree(loc, options, phase_type, province_name=None):
