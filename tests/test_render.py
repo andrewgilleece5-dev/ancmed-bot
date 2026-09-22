@@ -28,8 +28,21 @@ def test_modern_aliased_supply_centres_are_coloured():
 def test_modern_home_territory_is_tinted_from_turn_one():
     svg = render_board(Game(map_name="modern"), "modern")
     for svg_id, power in [("sax", "germany"), ("nav", "spain"), ("ana", "turkey"),
-                          ("ruh", "germany"), ("sib", "russia")]:
+                          ("ruh", "germany"), ("sib", "russia"), ("pru", "poland")]:
         assert _class_of(svg, svg_id) == power, svg_id
+
+
+def test_modern_atlantic_water_is_never_tinted_by_a_passing_fleet():
+    """NAO/SAO/MID's engine codes don't match their SVG polygon ids (drawn as
+    _nat/_sat/_mat) - same mismatch class as Seville/Liverpool - but unlike
+    those (land) supply centres, water is never coloured by ownership, so a
+    fleet merely passing through must not paint the whole sea."""
+    game = Game(map_name="modern")
+    game.set_units("FRANCE", game.get_units("FRANCE") + ["F NAO"])
+    svg = render_board(game, "modern")
+    assert _class_of(svg, "nat") == "water"
+    assert _class_of(svg, "mat") == "water"
+    assert _class_of(svg, "sat") == "water"
 
 
 def test_ancmed_and_standard_render_unchanged_size():

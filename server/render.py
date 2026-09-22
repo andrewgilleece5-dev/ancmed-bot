@@ -15,6 +15,15 @@ from diplomacy.engine.renderer import Renderer
 
 from .territory import HOME_TERRITORY, SVG_ID_ALIASES
 
+_LOC_TYPE_CACHE = {}
+
+
+def _loc_types(map_name):
+    """province -> 'WATER' | 'COAST' | 'LAND' | 'PORT', cached per map."""
+    if map_name not in _LOC_TYPE_CACHE:
+        _LOC_TYPE_CACHE[map_name] = Game(map_name=map_name).map.loc_type
+    return _LOC_TYPE_CACHE[map_name]
+
 
 def render_board(game, map_name, phase=None):
     """Return the SVG for the current position, or for a historical `phase`
@@ -90,7 +99,10 @@ def _set_class(svg, svg_id, css_class, only_if=None):
 
 
 def _fix_svg_id_aliases(svg, map_name, state):
+    loc_types = _loc_types(map_name)
     for code, svg_id in SVG_ID_ALIASES.get(map_name, {}).items():
+        if loc_types.get(code) == "WATER":
+            continue  # never colour water by ownership - matches the real renderer
         owner = _owner(state, code)
         if owner:
             svg = _set_class(svg, svg_id, owner.lower())

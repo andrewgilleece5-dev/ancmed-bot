@@ -94,11 +94,21 @@ class DumbBot(Bot):
 
     # ------------------------------------------------------------------ graph
     def _adjacency(self, game):
-        """province -> set(province), built once per map name."""
+        """province -> set(province), built once per map name.
+
+        Keys are inserted in sorted order (not the raw set-comprehension order,
+        which - like every ``set``/``dict`` of strings in Python - depends on
+        the interpreter's hash seed and so differs between processes). Nothing
+        here or in ``_province_values``/``_movement`` reads a set of provinces
+        without also depending on this dict's key order somewhere downstream
+        (softmax sampling consumes ``self._rng`` in whatever order the caller
+        iterates), so a random hash seed used to make ``DumbBot(seed=N)``
+        produce a *different* game on every restart despite an identical seed.
+        """
         cached = self._adj_by_map.get(game.map.name)
         if cached is not None:
             return cached
-        provinces = {province(loc) for loc in game.map.locs}
+        provinces = sorted({province(loc) for loc in game.map.locs})
         adj = {p: set() for p in provinces}
         for loc in game.map.locs:
             here = province(loc)
@@ -139,6 +149,24 @@ class DumbBot(Bot):
 
     # ------------------------------------------------------------ valuation
     def _province_values(self, game, power_name, possible, reach):
+        """Returns ``(value, garrison)``.
+
+        ``value`` is the diffused/gradient field used to pick *where to move* -
+        every legal move target's attractiveness, blurred across the whole
+        board (deliberately unit-type-agnostic: it just measures "how good a
+        province is to own", so it correctly spreads a rich cluster of targets
+        toward the units that can actually reach them, whichever type they are).
+
+        ``garrison`` is a *separate, undiffused* per-province bonus for how hard
+        our own centre at ``p`` is being pressed (``competition[p]``, i.e. real,
+        reachability-checked enemy units - never inflated by a same-map-graph
+        neighbour like an inland capital sitting next to a contested coast). It
+        is added only when scoring the unit actually standing on ``p`` holding,
+        or a neighbour supporting it to hold - never to the shared ``value``
+        field, so a threatened coastal centre can't make an unrelated inland
+        neighbour look artificially attractive to move into (or worth
+        abandoning its own post for).
+        """
         adj = self._adjacency(game)
         state = game.get_state()
         centers = state["centers"]
@@ -167,11 +195,15 @@ class DumbBot(Bot):
             return d
 
         base = {}
+        garrison = {}
         for p in adj:
             if p in all_sc:
                 o = owner.get(p)
                 if o == power_name:
-                    base[p] = self.OWN_BASE + self.defend_weight * self.THREAT_W * competition(p)
+                    base[p] = self.OWN_BASE
+                    threat = competition(p)
+                    if threat:
+                        garrison[p] = self.defend_weight * self.THREAT_W * threat
                 elif o:
                     takeable = max(0, strength(p) - defenders(p))
                     osize = sizes.get(o, 0)
@@ -216,7 +248,7 @@ class DumbBot(Bot):
             value[p] += (self.STRENGTH_W * strength(p)
                          - self.COMPETITION_W * competition(p)
                          + self._rng.uniform(-self.JITTER, self.JITTER))
-        return value
+        return value, garrison
 
     # -------------------------------------------------------------- dispatch
     def get_orders(self, game, power_name):
@@ -247,14 +279,17 @@ class DumbBot(Bot):
     def _movement(self, game, power_name):
         possible = game.get_all_possible_orders()
         reach = self._reach(game, possible)
-        values = self._province_values(game, power_name, possible, reach)
+        values, garrison = self._province_values(game, power_name, possible, reach)
 
         order_locs = game.get_orderable_locations(power_name)
         own_here = {province(loc) for loc in order_locs}
         loc_at = {province(loc): loc for loc in order_locs}
 
         def opts(loc):
-            return possible.get(loc, [])
+            # sorted: the engine hands these back as list(a_set), whose order
+            # depends on the process's string-hash seed - leaving it unsorted
+            # would make `DumbBot(seed=N)` pick differently between restarts
+            return sorted(possible.get(loc, []))
 
         # which convoy moves we can escort: {(src, dst): [fleet loc that can convoy]}
         convoy_escorts = defaultdict(list)
@@ -299,7 +334,9 @@ class DumbBot(Bot):
                     else:
                         s = values.get(tgt, 0.0)
                 elif p["action"] == "hold":
-                    s = values.get(here, 0.0) - self.HOLD_PENALTY
+                    # a centre under real threat should stay put, not chase
+                    # whatever the shared value field finds attractive elsewhere
+                    s = values.get(here, 0.0) - self.HOLD_PENALTY + garrison.get(here, 0.0)
                 else:
                     s = -20.0                          # supports handled in pass 2
                 scored.append((s, order, p))
@@ -348,7 +385,8 @@ class DumbBot(Bot):
                 if cur["action"] == "move" and anchor_mover.get(cur["target"]) == loc:
                     continue
                 cur_val = (values.get(cur["target"], 0.0) if cur["action"] == "move"
-                           else values.get(here, 0.0) - self.HOLD_PENALTY)
+                           else values.get(here, 0.0) - self.HOLD_PENALTY
+                           + garrison.get(here, 0.0))
                 best = (None, None, cur_val + self.SWITCH_MARGIN)
                 for order in opts(loc):
                     p = parse(order)
@@ -369,7 +407,7 @@ class DumbBot(Bot):
                             continue
                         if supported[tgt] >= self.MAX_SUPPORTERS:
                             continue
-                        v = values.get(tgt, 0.0) * self.SUPPORT_HOLD_FACTOR
+                        v = (values.get(tgt, 0.0) + garrison.get(tgt, 0.0)) * self.SUPPORT_HOLD_FACTOR
                         if v > best[2]:
                             best = (order, p, v)
                 if best[0]:
@@ -409,10 +447,10 @@ class DumbBot(Bot):
     def _retreats(self, game, power_name):
         possible = game.get_all_possible_orders()
         reach = self._reach(game, possible)
-        values = self._province_values(game, power_name, possible, reach)
+        values, _garrison = self._province_values(game, power_name, possible, reach)
         orders = []
         for loc in game.get_orderable_locations(power_name):
-            options = possible.get(loc, [])
+            options = sorted(possible.get(loc, []))
             retreats = [o for o in options if parse(o)["action"] == "retreat"]
             if retreats:
                 orders.append(max(
@@ -429,21 +467,25 @@ class DumbBot(Bot):
     def _adjustments(self, game, power_name):
         possible = game.get_all_possible_orders()
         reach = self._reach(game, possible)
-        values = self._province_values(game, power_name, possible, reach)
+        values, garrison = self._province_values(game, power_name, possible, reach)
         state = game.get_state()
         build = state["builds"][power_name]
         count = build["count"]
         orders = []
 
         if count > 0:
-            sites = sorted(build["homes"],
-                           key=lambda s: values.get(province(s), 0.0), reverse=True)
+            # build at the most valuable home first, breaking ties toward the
+            # one under the most pressure
+            sites = sorted(
+                build["homes"],
+                key=lambda s: (values.get(province(s), 0.0) + garrison.get(province(s), 0.0)),
+                reverse=True)
             for site in sites:
                 if len(orders) >= count:
                     break
-                builds = [o for key, o_list in possible.items()
-                          if province(key) == province(site)
-                          for o in o_list if parse(o)["action"] == "build"]
+                builds = sorted(o for key, o_list in possible.items()
+                                if province(key) == province(site)
+                                for o in o_list if parse(o)["action"] == "build")
                 if not builds:
                     continue
                 fleets = [o for o in builds if o.split()[0] == "F"]
@@ -457,12 +499,16 @@ class DumbBot(Bot):
                     orders.append(fleets[0])
 
         elif count < 0:
+            # disband from the least valuable / least pressed units first -
+            # never the ones holding a contested home centre if it can be helped
             units = [u for u in state["units"][power_name] if not u.startswith("*")]
-            weakest = sorted(units, key=lambda u: values.get(province(u[2:]), 0.0))
+            weakest = sorted(
+                units,
+                key=lambda u: values.get(province(u[2:]), 0.0) + garrison.get(province(u[2:]), 0.0))
             for unit in weakest[: -count]:
                 loc = unit[2:5]
-                disbands = [o for o in possible.get(loc, [])
-                            if parse(o)["action"] == "disband"]
+                disbands = sorted(o for o in possible.get(loc, [])
+                                  if parse(o)["action"] == "disband")
                 if disbands:
                     orders.append(disbands[0])
         return orders

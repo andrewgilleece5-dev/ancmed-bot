@@ -72,3 +72,37 @@ def test_make_bot_maps_legacy_name():
     assert make_bot("dumbbot").level == "medium"
     assert make_bot("hard").level == "hard"
     assert make_bot("nonsense").level == "medium"
+
+
+def _navarre_threatens_portugal():
+    """France has a fleet that can take Spain's Portugal (coastal) but never
+    Madrid (inland - fleets can't go there). Regression for a bug where the
+    Portugal garrison abandoned its post (often for a doomed lone attack on
+    the French fleet, sometimes dressed up as "defending" an inland capital a
+    fleet could never actually reach) because the shared, diffused value field
+    - not a real, reachability-checked threat - made leaving look attractive."""
+    game = Game(map_name="modern")
+    game.clear_units()
+    game.set_units("FRANCE", ["F NAV"])
+    game.set_units("SPAIN", ["A POR", "A MAD"])
+    game.clear_centers()
+    game.set_centers("FRANCE", ["PAR", "MAR", "BOR", "LYO"])
+    game.set_centers("SPAIN", ["MAD", "BAR", "SVE", "POR"])
+    return game
+
+
+def test_hard_bot_holds_a_directly_threatened_centre():
+    game = _navarre_threatens_portugal()
+    for seed in range(15):
+        bot = DumbBot(seed=seed, level="hard")
+        orders = bot.get_orders(game, "SPAIN")
+        assert "A POR H" in orders, orders
+
+
+def test_medium_bot_mostly_holds_a_directly_threatened_centre():
+    game = _navarre_threatens_portugal()
+    holds = sum(
+        1 for seed in range(20)
+        if "A POR H" in DumbBot(seed=seed, level="medium").get_orders(game, "SPAIN")
+    )
+    assert holds >= 14  # clearly the modal choice, not a coin flip

@@ -13,12 +13,13 @@ Modern assignments are the provinces that border only that nation's home SCs
 """
 
 SVG_ID_ALIASES = {
+    # Water provinces are deliberately not listed here even where their engine
+    # code also mismatches the SVG id (e.g. modern's NAO/SAO/MID are drawn as
+    # "_nat"/"_sat"/"_mat") - the renderer never colours water by ownership
+    # (see render._fix_svg_id_aliases), so there is nothing to fix for them.
     "modern": {
         "LIV": "lpl",   # Liverpool
         "SVE": "svl",   # Seville
-        "NAO": "nat",   # North Atlantic
-        "SAO": "sat",   # South Atlantic
-        "MID": "mat",   # Mid-Atlantic
     },
 }
 
@@ -29,7 +30,7 @@ HOME_TERRITORY = {
         "GERMANY": ["RUH", "SAX"],
         "SPAIN": ["NAV", "ADL"],
         "ITALY": ["PIE", "TUS", "APU"],
-        "POLAND": ["SIL"],
+        "POLAND": ["SIL", "PRU"],
         "RUSSIA": ["CRP", "VOL", "URA", "SIB"],
         "UKRAINE": ["POD", "DON"],
         "TURKEY": ["ANA"],
