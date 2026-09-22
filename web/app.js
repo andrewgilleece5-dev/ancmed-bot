@@ -8,7 +8,8 @@ const el = {
   game: $("#game"), status: $("#status"), newGameBtn: $("#new-game-btn"),
   mapSelect: $("#map-select"), powerSelect: $("#power-select"),
   difficultySelect: $("#difficulty-select"), mapNote: $("#map-note"),
-  startBtn: $("#start-btn"), mapHolder: $("#map-holder"),
+  startBtn: $("#start-btn"), mapHolder: $("#map-holder"), mapHint: $("#map-hint"),
+  orderMenu: $("#order-menu"),
   banner: $("#banner"), scTable: $("#sc-table"), winNote: $("#win-note"),
   ordersCard: $("#orders-card"), ordersTitle: $("#orders-title"),
   ordersHint: $("#orders-hint"), ordersList: $("#orders-list"), submitBtn: $("#submit-btn"),
@@ -35,7 +36,7 @@ const ACTION_LABEL = {
 };
 
 let MAPS = [];
-let state = null;      // latest live state
+let state = null;        // latest live state
 let viewingIndex = null; // history index being viewed, or null = current
 
 async function api(path, opts) {
@@ -114,6 +115,7 @@ function powerColors(svgText) {
 function setState(s) {
   state = s;
   viewingIndex = null;
+  resetSelection();
   el.setup.hidden = true;
   el.game.hidden = false;
   el.newGameBtn.hidden = false;
@@ -132,6 +134,20 @@ function setState(s) {
 
 function showBoard(svg) {
   el.mapHolder.innerHTML = svg;
+  markOrderableProvinces();
+  reapplySelectionHighlight();
+}
+
+function markOrderableProvinces() {
+  const orderable = state && !state.is_done && viewingIndex === null;
+  el.mapHolder.classList.toggle("pickable", !!orderable);
+  if (!orderable) return;
+  const svg = el.mapHolder.querySelector("svg");
+  if (!svg) return;
+  for (const loc of Object.keys(state.orderable)) {
+    const node = svgNodeFor(loc);
+    if (node) node.setAttribute("data-orderable", "1");
+  }
 }
 
 function renderSidebar(s) {
@@ -184,6 +200,7 @@ el.histNext.onclick = () => {
 el.returnCurrent.onclick = () => gotoPhase(null);
 
 async function gotoPhase(index) {
+  resetSelection();
   if (index === null) {
     viewingIndex = null;
     showBoard(state.svg);
@@ -219,6 +236,7 @@ function renderOrders(s) {
   const locs = Object.keys(s.orderable).sort();
   el.ordersTitle.textContent =
     { M: "Your orders", R: "Retreats", A: "Builds & disbands" }[s.phase_type] || "Orders";
+  el.mapHint.hidden = !locs.length;
 
   if (s.phase_type === "A" && s.builds_allowed != null) {
     el.ordersHint.textContent = s.builds_allowed
@@ -241,6 +259,19 @@ function renderOrders(s) {
     }
   }
   el.submitBtn.onclick = submit;
+}
+
+function populateSecondary(secondary, action) {
+  const list = action.targets || action.moves;
+  if (list) {
+    secondary.hidden = false;
+    secondary.innerHTML = list
+      .map((t) => `<option value="${encodeURIComponent(t.order)}">${t.label}</option>`)
+      .join("");
+  } else {
+    secondary.hidden = true;
+    secondary.innerHTML = "";
+  }
 }
 
 function orderRow(node, phaseType) {
@@ -268,20 +299,11 @@ function orderRow(node, phaseType) {
   secondary.className = "secondary";
   selects.appendChild(secondary);
 
-  function refresh() {
-    const a = acts[Number(primary.value)];
-    const list = a.targets || a.moves;
-    if (list) {
-      secondary.hidden = false;
-      secondary.innerHTML = list
-        .map((t) => `<option value="${encodeURIComponent(t.order)}">${t.label}</option>`)
-        .join("");
-    } else {
-      secondary.hidden = true;
-      secondary.innerHTML = "";
-    }
-  }
-  primary.onchange = refresh;
+  primary.onchange = () => {
+    populateSecondary(secondary, acts[Number(primary.value)]);
+    onOrderRowChanged();
+  };
+  secondary.onchange = onOrderRowChanged;
 
   // default selection
   let def = 0;
@@ -296,7 +318,7 @@ function orderRow(node, phaseType) {
     if (idx >= 0) { def = idx; break; }
   }
   primary.value = String(def);
-  refresh();
+  populateSecondary(secondary, acts[def]);
 
   return row;
 }
@@ -313,11 +335,67 @@ function resolveRow(row) {
   return secondary.value ? decodeURIComponent(secondary.value) : null;
 }
 
+function collectOrders() {
+  return [...el.ordersList.querySelectorAll(".order-row")].map(resolveRow).filter(Boolean);
+}
+
+/** Set a unit's dropdown row to match `order` (from a map click), without
+ * assuming which action/target it resolves to - mirrors resolveRow() in reverse. */
+function applyOrderToRow(loc, order) {
+  const row = el.ordersList.querySelector(`.order-row[data-loc="${cssEscape(loc)}"]`);
+  const node = state.orderable[loc];
+  if (!row || !node) return;
+  const primary = row.querySelector(".primary");
+  const secondary = row.querySelector(".secondary");
+  for (let i = 0; i < node.actions.length; i++) {
+    const a = node.actions[i];
+    const list = a.targets || a.moves;
+    if (list) {
+      const hit = list.find((t) => t.order === order);
+      if (hit) {
+        primary.value = String(i);
+        populateSecondary(secondary, a);
+        secondary.value = encodeURIComponent(order);
+        return;
+      }
+    } else if ((a.order || null) === (order || null)) {
+      primary.value = String(i);
+      populateSecondary(secondary, a);
+      return;
+    }
+  }
+}
+
+function cssEscape(s) {
+  return window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/["\\]/g, "\\$&");
+}
+
+let previewTimer = null;
+function onOrderRowChanged() {
+  if (!state || viewingIndex !== null) return;
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshPreview, 50);
+}
+
+async function refreshPreview() {
+  if (!state || viewingIndex !== null) return;
+  try {
+    const res = await api(`/api/games/${state.game_id}/preview`, {
+      method: "POST",
+      body: JSON.stringify({ orders: collectOrders() }),
+    });
+    el.mapHolder.innerHTML = res.svg;
+    markOrderableProvinces();
+    reapplySelectionHighlight();
+  } catch (_) {
+    // a stale preview render isn't worth interrupting the player over
+  }
+}
+
 async function submit() {
   el.overlay.hidden = false;
-  const orders = [...el.ordersList.querySelectorAll(".order-row")]
-    .map(resolveRow)
-    .filter(Boolean);
+  resetSelection();
+  const orders = collectOrders();
   try {
     const s = await api(`/api/games/${state.game_id}/orders`, {
       method: "POST",
@@ -328,6 +406,239 @@ async function submit() {
     alert(err.message);
   } finally {
     el.overlay.hidden = true;
+  }
+}
+
+/* ------------------------------------------------- click-to-order on map --- */
+// `selection` walks a unit through: pick an action -> (if it needs a target)
+// pick a destination, or for support-move/convoy, pick the supported unit
+// then its destination. Every step is resolvable either by clicking the
+// board or by clicking the floating menu's list - same data, two inputs.
+let selection = null;
+// null
+// | { loc, mode: "menu" }
+// | { loc, mode: "target", action }
+// | { loc, mode: "from",   action }
+// | { loc, mode: "to",     action, from }
+
+function svgNodeFor(code) {
+  const svg = el.mapHolder.querySelector("svg");
+  return svg ? svg.querySelector(`[id="_${code.toLowerCase()}"]`) : null;
+}
+
+function resetSelection() {
+  selection = null;
+  hideMenu();
+  clearHighlight();
+}
+
+function clearHighlight() {
+  const svg = el.mapHolder.querySelector("svg");
+  if (!svg) return;
+  svg.querySelectorAll(".hl-selected, .hl-target").forEach((n) =>
+    n.classList.remove("hl-selected", "hl-target")
+  );
+}
+
+function clearTargetHighlight() {
+  const svg = el.mapHolder.querySelector("svg");
+  if (svg) svg.querySelectorAll(".hl-target").forEach((n) => n.classList.remove("hl-target"));
+}
+
+function highlight(cls, codes) {
+  for (const code of codes) {
+    const n = svgNodeFor(code);
+    if (n) n.classList.add(cls);
+  }
+}
+
+function reapplySelectionHighlight() {
+  if (!selection) return;
+  highlight("hl-selected", [selection.loc]);
+  if (selection.mode === "target") {
+    highlight("hl-target", selection.action.targets.map((t) => t.prov));
+  } else if (selection.mode === "from") {
+    highlight("hl-target", [...new Set(selection.action.moves.map((m) => m.from))]);
+  } else if (selection.mode === "to") {
+    highlight(
+      "hl-target",
+      selection.action.moves.filter((m) => m.from === selection.from).map((m) => m.to)
+    );
+  }
+}
+
+el.mapHolder.addEventListener("click", (event) => {
+  if (!state || state.is_done || viewingIndex !== null) return;
+  const hit = event.target.closest && event.target.closest('[id^="_"]');
+  if (!hit) return;
+  handleProvinceClick(hit.id.slice(1).toUpperCase(), event);
+});
+
+document.addEventListener("click", (event) => {
+  if (!selection) return;
+  if (el.orderMenu.contains(event.target) || el.mapHolder.contains(event.target)) return;
+  resetSelection();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && selection) resetSelection();
+});
+
+function handleProvinceClick(code, event) {
+  if (selection && (selection.mode === "target" || selection.mode === "from" || selection.mode === "to")) {
+    if (resolveClickAgainstSelection(code)) return;
+  }
+  if (Object.prototype.hasOwnProperty.call(state.orderable, code)) {
+    selectUnit(code, event);
+  } else {
+    resetSelection();
+  }
+}
+
+function resolveClickAgainstSelection(code) {
+  if (selection.mode === "target") {
+    const hit = selection.action.targets.find((t) => t.prov === code);
+    if (hit) { finalizeOrder(selection.loc, hit.order); return true; }
+    return false;
+  }
+  if (selection.mode === "from") {
+    const matches = selection.action.moves.filter((m) => m.from === code);
+    if (matches.length) {
+      selection = { ...selection, mode: "to", from: code };
+      clearTargetHighlight();
+      highlight("hl-target", matches.map((m) => m.to));
+      showToMenu(matches);
+      return true;
+    }
+    return false;
+  }
+  if (selection.mode === "to") {
+    const hit = selection.action.moves.find((m) => m.from === selection.from && m.to === code);
+    if (hit) { finalizeOrder(selection.loc, hit.order); return true; }
+    return false;
+  }
+  return false;
+}
+
+function selectUnit(loc, event) {
+  clearHighlight();
+  selection = { loc, mode: "menu" };
+  highlight("hl-selected", [loc]);
+  showActionMenu(state.orderable[loc], event);
+}
+
+function chooseAction(action) {
+  if (!selection) return;
+  if (!action.targets && !action.moves) {
+    finalizeOrder(selection.loc, action.order || null);
+    return;
+  }
+  if (action.targets) {
+    selection = { ...selection, mode: "target", action };
+    clearTargetHighlight();
+    highlight("hl-target", action.targets.map((t) => t.prov));
+    showTargetMenu(action.targets);
+    return;
+  }
+  selection = { ...selection, mode: "from", action };
+  clearTargetHighlight();
+  highlight("hl-target", [...new Set(action.moves.map((m) => m.from))]);
+  showFromMenu(action.moves);
+}
+
+function finalizeOrder(loc, order) {
+  applyOrderToRow(loc, order);
+  resetSelection();
+  onOrderRowChanged();
+}
+
+/* ---- floating menu ------------------------------------------------------ */
+function hideMenu() {
+  el.orderMenu.hidden = true;
+  el.orderMenu.innerHTML = "";
+}
+
+function menuFrame(titleText) {
+  el.orderMenu.innerHTML = "";
+  const t = document.createElement("div");
+  t.className = "menu-title";
+  t.textContent = titleText;
+  el.orderMenu.appendChild(t);
+  return el.orderMenu;
+}
+
+function menuButton(text, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = text;
+  // stopPropagation matters here: onClick() typically rebuilds #order-menu's
+  // innerHTML (clearing this very button out of the DOM) or hides the menu
+  // entirely before this click finishes bubbling. If it reached the
+  // document-level "click outside closes the menu" listener afterwards,
+  // `orderMenu.contains(event.target)` would see the now-detached button and
+  // read as "outside", re-cancelling the selection this same click just made.
+  btn.onclick = (event) => {
+    event.stopPropagation();
+    onClick();
+  };
+  el.orderMenu.appendChild(btn);
+}
+
+function menuBackButton() {
+  menuButton("← Start over", () => selectUnit(selection.loc, null));
+  el.orderMenu.lastElementChild.classList.add("menu-back");
+}
+
+function showActionMenu(node, event) {
+  menuFrame(node.label);
+  for (const action of node.actions) {
+    menuButton(ACTION_LABEL[action.type] || action.type, () => chooseAction(action));
+  }
+  positionMenu(event);
+}
+
+function showTargetMenu(targets) {
+  menuFrame("Choose a destination");
+  for (const t of targets) {
+    menuButton(t.label, () => finalizeOrder(selection.loc, t.order));
+  }
+  menuBackButton();
+  positionMenu(null);
+}
+
+function showFromMenu(moves) {
+  menuFrame("Support / convoy which unit?");
+  const seen = new Set();
+  for (const m of moves) {
+    if (seen.has(m.from)) continue;
+    seen.add(m.from);
+    menuButton(m.label.split(" → ")[0], () => resolveClickAgainstSelection(m.from));
+  }
+  menuBackButton();
+  positionMenu(null);
+}
+
+function showToMenu(moves) {
+  menuFrame("...moving to?");
+  for (const m of moves) {
+    menuButton(m.label.split(" → ")[1] || m.label, () => finalizeOrder(selection.loc, m.order));
+  }
+  menuBackButton();
+  positionMenu(null);
+}
+
+function positionMenu(event) {
+  const menu = el.orderMenu;
+  menu.hidden = false;
+  if (event) {
+    const pad = 8;
+    let x = event.clientX + pad;
+    let y = event.clientY + pad;
+    const rect = menu.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth - pad) x = window.innerWidth - rect.width - pad;
+    if (y + rect.height > window.innerHeight - pad) y = window.innerHeight - rect.height - pad;
+    menu.style.left = `${Math.max(pad, x)}px`;
+    menu.style.top = `${Math.max(pad, y)}px`;
   }
 }
 

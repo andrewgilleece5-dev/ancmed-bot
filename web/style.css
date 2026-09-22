@@ -91,6 +91,65 @@ button:disabled { opacity: .5; cursor: default; }
   overflow-x: auto;
 }
 #map-holder svg { width: 100%; height: auto; display: block; }
+#map-holder svg [id^="_"] { cursor: default; }
+#map-holder.pickable svg [data-orderable] { cursor: pointer; }
+
+/* click-to-order highlights - additive classes on the SVG province element
+   (a plain polygon, or a <g> wrapping a multi-part province), so the
+   province keeps its normal ownership fill and only gains an outline */
+#map-holder svg .hl-selected,
+#map-holder svg .hl-selected > * {
+  stroke: var(--accent) !important;
+  stroke-width: 6px !important;
+}
+#map-holder svg .hl-target,
+#map-holder svg .hl-target > * {
+  stroke: var(--ok) !important;
+  stroke-width: 5px !important;
+  stroke-dasharray: 6 3;
+}
+
+#map-hint { margin: 0; }
+
+.order-menu {
+  position: fixed;
+  z-index: 15;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 220px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.order-menu .menu-title {
+  font-size: 12px;
+  color: var(--dim);
+  padding: 4px 8px 2px;
+}
+.order-menu button {
+  margin: 0;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--ink);
+  border: none;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 14px;
+}
+.order-menu button:hover { background: var(--bg); filter: none; }
+.order-menu button.picked { background: #f6e9e3; font-weight: 600; }
+.order-menu .menu-back {
+  color: var(--dim);
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 6px;
+}
 
 .timebar {
   display: flex;

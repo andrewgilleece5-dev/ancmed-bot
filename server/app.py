@@ -6,6 +6,9 @@ GET  /api/maps                 list playable maps and their powers
 POST /api/games                {map_name, power, difficulty} -> new game + state
 GET  /api/games/{id}           current state (svg + friendly order tree)
 POST /api/games/{id}/orders    {orders:[...]} -> submit, run the bots, advance
+POST /api/games/{id}/preview   {orders:[...]} -> board redrawn with just those
+                                arrows, for the click-to-order map; doesn't
+                                touch the stored game
 GET  /api/games/{id}/phase/{i} a past phase re-rendered with its move arrows
 GET  /api/games/{id}/svg       raw rendered board svg
 /                              single-page UI from ./web
@@ -20,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from diplomacy import Game
+from diplomacy.utils.export import from_saved_game_format, to_saved_game_format
 
 from .bot import make_bot
 from .orders import order_tree, parse
@@ -234,6 +238,29 @@ def submit_orders(game_id: str, req: OrdersRequest):
         store.persist(game_id)
     _PHASE_SVG_CACHE.clear()
     return _state(game_id)
+
+
+@app.post("/api/games/{game_id}/preview")
+def preview_orders(game_id: str, req: OrdersRequest):
+    """For the click-to-order map: render the current position with just the
+    human's in-progress (possibly partial) order selection drawn as arrows.
+    Never touches the stored game - it clones, sets orders on the clone, and
+    throws it away; `process()` is never called, so nothing is adjudicated."""
+    game, meta = store.get(game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="no such game")
+    human = meta["human_power"]
+    with store.lock(game_id):
+        if game.is_game_done or human not in game.powers:
+            return {"svg": render_board(game, meta["map_name"])}
+        clone = from_saved_game_format(to_saved_game_format(game))
+        allowed = set()
+        for opts in clone.get_all_possible_orders().values():
+            allowed.update(opts)
+        clean = [o for o in (req.orders or []) if o in allowed]
+        if clean:
+            clone.set_orders(human, clean)
+        return {"svg": render_board(clone, meta["map_name"])}
 
 
 @app.get("/api/games/{game_id}/phase/{index}")

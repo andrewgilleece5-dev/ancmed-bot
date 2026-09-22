@@ -4,7 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Diplomacy vs. Bots</title>
-  <link rel="stylesheet" href="/style.css" />
+  <!-- ?v=N is a manual cache-buster: bump both below whenever app.js/style.css
+       change, so a browser that already cached the old files picks up the new
+       ones on the next visit instead of silently running stale code. -->
+  <link rel="stylesheet" href="/style.css?v=5" />
 </head>
 <body>
   <header>
@@ -40,8 +43,10 @@
           <button id="hist-next" class="ghost" title="Next phase">▶</button>
           <span id="hist-label" class="hist-label"></span>
         </div>
+        <p class="note" id="map-hint">Click one of your units to give it an order.</p>
         <div class="board"><div id="map-holder"></div></div>
       </div>
+      <div id="order-menu" class="order-menu" hidden></div>
 
       <aside class="side">
         <div id="banner" class="banner" hidden></div>
@@ -80,6 +85,6 @@
 
   <div id="overlay" class="overlay" hidden><div class="spinner"></div><span>Bots are moving&hellip;</span></div>
 
-  <script src="/app.js"></script>
+  <script src="/app.js?v=5"></script>
 </body>
 </html>

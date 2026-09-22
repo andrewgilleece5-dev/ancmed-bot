@@ -123,13 +123,16 @@ def order_tree(loc, options, phase_type, province_name=None):
         actions.append({"type": kind, "order": order})
 
     def targets(orders, dest_of):
+        # `prov` is the bare province code (no coast) - it's what a map click
+        # resolves to (the SVG has one polygon per province, not per coast),
+        # so the click UI matches on it rather than re-parsing `order`.
         seen, out = set(), []
         for o in sorted(orders):
             dest = dest_of(o)
             if dest in seen:
                 continue
             seen.add(dest)
-            out.append({"label": _name(province_name, dest), "order": o})
+            out.append({"label": _name(province_name, dest), "order": o, "prov": province(dest)})
         return out
 
     if phase_type == "M":
@@ -151,6 +154,8 @@ def order_tree(loc, options, phase_type, province_name=None):
                         "label": "%s → %s" % (
                             _name(province_name, p["from"]), _name(province_name, p["target"])),
                         "order": o,
+                        "from": p["from"],   # bare province codes - a click-UI
+                        "to": p["target"],   # picks `from` first, then `to`
                     })
                 actions.append({"type": kind, "moves": moves})
 
@@ -171,7 +176,8 @@ def order_tree(loc, options, phase_type, province_name=None):
             elif fleets:
                 actions.append({
                     "type": "build_fleet",
-                    "targets": [{"label": _name(province_name, o.split()[1]), "order": o}
+                    "targets": [{"label": _name(province_name, o.split()[1]), "order": o,
+                                "prov": province(o.split()[1])}
                                 for o in sorted(fleets)],
                 })
             add_leaf("waive", "WAIVE")
